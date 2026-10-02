@@ -6,6 +6,7 @@ Run:  python app.py
 """
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -82,23 +83,36 @@ def transcribe_chunk(path: Path, mode: str = "codemix") -> str:
 
 
 def analyze(transcript: str) -> dict:
-    r = requests.post(
-        "https://api.sarvam.ai/v1/chat/completions",
-        headers={"api-subscription-key": SARVAM_KEY},
-        json={
-            "model": ANALYSIS_MODEL,
-            "max_tokens": 1500,
-            "messages": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": transcript},
-            ],
-        },
-        timeout=90,
-    )
-    r.raise_for_status()
-    text = r.json()["choices"][0]["message"]["content"] or ""
-    # Be forgiving: grab the JSON object even if the model adds extra text or code fences.
-    return json.loads(text[text.index("{"): text.rindex("}") + 1])
+    last_raw = ""
+    for attempt in range(2):
+        r = requests.post(
+            "https://api.sarvam.ai/v1/chat/completions",
+            headers={"api-subscription-key": SARVAM_KEY},
+            json={
+                "model": ANALYSIS_MODEL,
+                "max_tokens": 4000,  # reasoning models can spend a lot on "thinking"
+                "messages": [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": transcript},
+                ],
+            },
+            timeout=120,
+        )
+        r.raise_for_status()
+        choice = r.json()["choices"][0]
+        raw = choice["message"].get("content") or ""
+        last_raw = raw
+        text = re.sub(r"<think>.*?</think>", "", raw, flags=re.S)  # drop thinking text
+        if "{" in text and "}" in text:
+            try:
+                return json.loads(text[text.index("{"): text.rindex("}") + 1])
+            except json.JSONDecodeError:
+                pass
+        print(f"[analyze attempt {attempt + 1}] no valid JSON. "
+              f"finish_reason={choice.get('finish_reason')} raw={raw[:500]!r}")
+    # Fallback so the user still gets their transcript instead of an error
+    return {"language": "hi", "intent": "other", "entities": [],
+            "summary_en": "", "reply": "Maine suna, par poori tarah samajh nahi paya. Kripya dobara bolkar bhejiye."}
 
 
 def handle_voice(chat_id: int, file_id: str) -> None:
